@@ -686,7 +686,7 @@ def create_ui():
                                 outputs=[general_threshold, char_threshold]
                             )
 
-                        use_break = gr.Checkbox(label="BREAK形式で出力", value=False)
+                        use_break = gr.Checkbox(label="BREAK形式で出力", value=True)
                         analyze_btn = gr.Button("タグを生成", variant="primary")
 
                     with gr.Column(scale=2):
