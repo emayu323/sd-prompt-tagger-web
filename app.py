@@ -49,6 +49,12 @@ TAG_CATEGORIES = {
             r"^beautiful$", r"^smooth[\s_]quality$", r"^4k$", r"^8k$", r"^aesthetic$",
             r"^very[\s_]aesthetic.*", r"^extremely[\s_]smooth[\s_]skin$", r"^cute[\s_]face$",
             r"^soft[\s_]breasts$",
+            r"^amazing[\s_]quality$", r"^great[\s_]quality$", r"^good[\s_]quality$",
+            r"^official[\s_]art$", r"^production[\s_]art$", r"^key[\s_]visual$",
+            r"^colorful$", r"^vivid[\s_]colors$", r"^sharp[\s_]focus$",
+            r"^hyper[\s_]detailed$", r"^intricate[\s_]details$",
+            r"^cinematic[\s_]lighting$", r"^volumetric[\s_]lighting$",
+            r"^year[\s_]\d{4}$",  # year tags
         ]
     },
     "character_count": {
