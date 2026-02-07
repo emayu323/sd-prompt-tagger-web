@@ -37,11 +37,20 @@ TAGS_FILE = "selected_tags.csv"
 DEFAULT_GENERAL_THRESHOLD = 0.35
 DEFAULT_CHARACTER_THRESHOLD = 0.85
 
-# 品質タグテンプレート（固定）
-QUALITY_TEMPLATE = "masterpiece,best quality,absurdres,highres,(very aesthetic:0.8),high quality,detailed,insanely detailed,beautiful,Smooth Quality,4k,extremely smooth skin,cute face,soft breasts,"
+# 品質タグテンプレート（固定） - 廃止予定だが念のため残すか、空にする
+QUALITY_TEMPLATE = ""
 
 # タグカテゴリ分類パターン
 TAG_CATEGORIES = {
+    "quality": {
+        "patterns": [
+            r"^masterpiece$", r"^best[\s_]quality$", r"^high[\s_]quality$",
+            r"^absurdres$", r"^highres$", r"^detailed$", r"^insanely[\s_]detailed$",
+            r"^beautiful$", r"^smooth[\s_]quality$", r"^4k$", r"^8k$", r"^aesthetic$",
+            r"^very[\s_]aesthetic.*", r"^extremely[\s_]smooth[\s_]skin$", r"^cute[\s_]face$",
+            r"^soft[\s_]breasts$",
+        ]
+    },
     "character_count": {
         "patterns": [
             r"^1girl$", r"^2girls$", r"^3girls$", r"^4girls$", r"^5girls$", r"^6\+girls$", r"^multiple[\s_]girls$",
@@ -419,9 +428,9 @@ class TagFormatter:
         return ", ".join(formatted)
 
     @staticmethod
-    def format_with_break(tags: List[str], quality_template: str = QUALITY_TEMPLATE) -> str:
+    def format_with_break(tags: List[str], quality_template: str = "") -> str:
         """タグをカテゴリ別に分類してBREAK形式で出力"""
-        categorized = {"character_attr": [], "pose_angle": []}
+        categorized = {"quality": [], "character_attr": [], "pose_angle": []}
 
         character_categories = {"character_count", "hair_color", "hair_style", "eye_color", "eye_feature", "body"}
         pose_categories = {"angle", "focus", "expression", "pose", "background"}
@@ -430,7 +439,9 @@ class TagFormatter:
             category = TagFormatter.categorize_tag(tag)
             formatted_tag = tag.replace('_', ' ')
 
-            if category in character_categories:
+            if category == "quality":
+                categorized["quality"].append(formatted_tag)
+            elif category in character_categories:
                 categorized["character_attr"].append(formatted_tag)
             elif category in pose_categories:
                 categorized["pose_angle"].append(formatted_tag)
@@ -438,13 +449,26 @@ class TagFormatter:
                 categorized["pose_angle"].append(formatted_tag)
 
         sections = []
-        sections.append(quality_template.rstrip(','))
+        
+        # Quality Section (User Input + Detected)
+        quality_section = []
+        if quality_template:
+             quality_section.extend([t.strip() for t in quality_template.split(',') if t.strip()])
+        
+        # Deduplicate detected tags against user input if needed, or just append. 
+        # Plan says "Ensure tags are not duplicated".
+        for qt in categorized["quality"]:
+            if qt not in quality_section:
+                quality_section.append(qt)
+        
+        if quality_section:
+            sections.append(", ".join(quality_section) + ",")
 
         if categorized["character_attr"]:
-            sections.append(",".join(categorized["character_attr"]) + ",")
+            sections.append(", ".join(categorized["character_attr"]) + ",")
 
         if categorized["pose_angle"]:
-            sections.append(",".join(categorized["pose_angle"]) + ",")
+            sections.append(", ".join(categorized["pose_angle"]) + ",")
 
         return "\nBREAK\n".join(sections)
 
@@ -462,7 +486,8 @@ def analyze_single_image(
     image: Image.Image,
     general_threshold: float,
     character_threshold: float,
-    use_break_format: bool
+    use_break_format: bool,
+    quality_tags: str = "",
 ) -> Tuple[str, str, str, str, str, str, str, str, str]:
     """単一画像を解析"""
     if image is None:
@@ -472,7 +497,7 @@ def analyze_single_image(
 
     # タグをフォーマット
     if use_break_format:
-        main_tags = TagFormatter.format_with_break(results['all_tags'])
+        main_tags = TagFormatter.format_with_break(results['all_tags'], quality_template=quality_tags)
     else:
         main_tags = TagFormatter.format_tags(results['all_tags'])
 
@@ -686,6 +711,13 @@ def create_ui():
                                 outputs=[general_threshold, char_threshold]
                             )
 
+                        quality_tags_input = gr.Textbox(
+                            label="追加の品質タグ（検出された品質タグの前に手動で追加）",
+                            lines=2,
+                            value="",
+                            placeholder="必要であれば追加の品質タグを入力..."
+                        )
+
                         use_break = gr.Checkbox(label="BREAK形式で出力", value=True)
                         analyze_btn = gr.Button("タグを生成", variant="primary")
 
@@ -725,7 +757,7 @@ def create_ui():
 
                 analyze_btn.click(
                     fn=analyze_single_image,
-                    inputs=[single_image, general_threshold, char_threshold, use_break],
+                    inputs=[single_image, general_threshold, char_threshold, use_break, quality_tags_input],
                     outputs=[main_output, angle_output, focus_output, expression_output,
                              pose_output, background_output, clothing_output, char_attr_output, rating_output]
                 )
@@ -733,7 +765,7 @@ def create_ui():
                 # 画像アップロード時も自動解析
                 single_image.change(
                     fn=analyze_single_image,
-                    inputs=[single_image, general_threshold, char_threshold, use_break],
+                    inputs=[single_image, general_threshold, char_threshold, use_break, quality_tags_input],
                     outputs=[main_output, angle_output, focus_output, expression_output,
                              pose_output, background_output, clothing_output, char_attr_output, rating_output]
                 )
