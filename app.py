@@ -227,6 +227,27 @@ TAG_CATEGORIES = {
     },
 }
 
+# タグ出力時のカテゴリ順序（TAG_CATEGORIESから自動生成 + other を末尾に追加）
+CATEGORY_ORDER = list(TAG_CATEGORIES.keys()) + ["other"]
+
+# カテゴリの日本語ラベル（UIチェックボックス用）
+CATEGORY_LABELS = {
+    "quality": "品質",
+    "character_count": "人数",
+    "hair_color": "髪色",
+    "hair_style": "髪型",
+    "eye_color": "目色",
+    "eye_feature": "目の特徴",
+    "body": "体型",
+    "angle": "アングル",
+    "focus": "フォーカス",
+    "expression": "表情",
+    "pose": "ポーズ",
+    "background": "背景",
+    "clothing": "服装",
+    "other": "その他",
+}
+
 
 # ============================================================
 # モデル管理
@@ -675,6 +696,77 @@ def analyze_multiple_images(
     )
 
 
+def analyze_images_per_row(
+    images: List[Image.Image],
+    general_threshold: float,
+    character_threshold: float,
+    selected_categories: List[str],
+    progress=gr.Progress()
+) -> str:
+    """
+    複数画像を解析し、画像1枚 = 1行のワイルドカードテキストを生成。
+    各行のタグはカテゴリ順に並べる。
+    """
+    if not images:
+        return ""
+
+    lines = []
+    for img in progress.tqdm(images, desc="処理中"):
+        if img is None:
+            continue
+
+        results = tagger.predict(img, general_threshold, character_threshold)
+
+        # タグをカテゴリ別に分類（順序付き）
+        categorized: Dict[str, List[str]] = {cat: [] for cat in CATEGORY_ORDER}
+
+        for tag in results['all_tags']:
+            category = TagFormatter.categorize_tag(tag)
+            formatted_tag = tag.replace('_', ' ')
+            if category in categorized:
+                categorized[category].append(formatted_tag)
+            else:
+                categorized["other"].append(formatted_tag)
+
+        # 選択されたカテゴリのみ、カテゴリ順に結合
+        row_tags = []
+        for cat in CATEGORY_ORDER:
+            if cat in selected_categories and categorized[cat]:
+                row_tags.extend(categorized[cat])
+
+        if row_tags:
+            lines.append(", ".join(row_tags))
+
+    return "\n".join(lines)
+
+
+def create_per_image_wildcard_file(wildcard_text: str) -> Optional[str]:
+    """画像ごとワイルドカードのテキストファイルを作成"""
+    if not wildcard_text or not wildcard_text.strip():
+        return None
+
+    tmp_dir = tempfile.mkdtemp()
+    filepath = os.path.join(tmp_dir, "wildcard.txt")
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write(wildcard_text.strip())
+
+    return filepath
+
+
+def load_images_from_files(files):
+    """アップロードされたファイルから画像を読み込む"""
+    if files is None:
+        return []
+    images = []
+    for f in files:
+        try:
+            img = Image.open(f.name)
+            images.append(img)
+        except Exception:
+            pass
+    return images
+
+
 # ============================================================
 # Gradio UI
 # ============================================================
@@ -792,154 +884,275 @@ def create_ui():
 
             # === タブ2: ワイルドカード作成 ===
             with gr.TabItem("ワイルドカード作成"):
-                gr.Markdown("複数の画像からタグを抽出し、カテゴリ別にワイルドカードを作成します")
+                gr.Markdown("複数の画像からタグを抽出してワイルドカードを作成します")
 
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        multi_images = gr.Gallery(
-                            label="画像をアップロード（複数可）",
-                            columns=3,
-                            height=300,
-                            object_fit="contain"
+                with gr.Tabs():
+                    # --- サブタブ: 画像ごとワイルドカード ---
+                    with gr.TabItem("画像ごと"):
+                        gr.Markdown("画像1枚 = ワイルドカード1行。タグはカテゴリ順に並びます。")
+
+                        with gr.Row():
+                            with gr.Column(scale=1):
+                                pi_gallery = gr.Gallery(
+                                    label="画像をアップロード（複数可）",
+                                    columns=3,
+                                    height=300,
+                                    object_fit="contain"
+                                )
+                                pi_files = gr.File(
+                                    label="画像ファイルを選択",
+                                    file_count="multiple",
+                                    file_types=["image"]
+                                )
+
+                                with gr.Group():
+                                    gr.Markdown("### しきい値設定")
+                                    pi_general_threshold = gr.Slider(
+                                        minimum=0.0, maximum=1.0, value=0.35, step=0.05,
+                                        label="一般タグ"
+                                    )
+                                    pi_char_threshold = gr.Slider(
+                                        minimum=0.0, maximum=1.0, value=0.85, step=0.05,
+                                        label="キャラクタータグ"
+                                    )
+
+                                gr.Markdown("### 出力するカテゴリを選択")
+                                # カテゴリチェックボックスをCATEGORY_ORDERとCATEGORY_LABELSから動的に生成
+                                pi_cat_checks = {}
+                                for i in range(0, len(CATEGORY_ORDER), 4):
+                                    with gr.Row():
+                                        for cat in CATEGORY_ORDER[i:i + 4]:
+                                            label = CATEGORY_LABELS.get(cat, cat)
+                                            pi_cat_checks[cat] = gr.Checkbox(label=label, value=True)
+
+                                pi_extract_btn = gr.Button("ワイルドカードを生成", variant="primary")
+
+                            with gr.Column(scale=2):
+                                pi_output = gr.Textbox(
+                                    label="ワイルドカード（1行 = 1画像）",
+                                    lines=20,
+                                    max_lines=100,
+                                )
+                                pi_line_count = gr.Markdown("0 行")
+
+                                with gr.Row():
+                                    pi_download_btn = gr.Button("ダウンロード (.txt)", variant="secondary")
+                                    pi_download_file = gr.File(label="ダウンロード", visible=False)
+
+                        pi_files.change(
+                            fn=load_images_from_files,
+                            inputs=[pi_files],
+                            outputs=[pi_gallery]
                         )
-                        multi_files = gr.File(
-                            label="画像ファイルを選択",
-                            file_count="multiple",
-                            file_types=["image"]
+
+                        # タグ抽出（画像ごと）
+                        def extract_per_image(
+                            files, general_th, char_th,
+                            chk_quality, chk_character_count,
+                            chk_hair_color, chk_hair_style,
+                            chk_eye_color, chk_eye_feature,
+                            chk_body, chk_angle,
+                            chk_focus, chk_expression,
+                            chk_pose, chk_background,
+                            chk_clothing, chk_other,
+                            progress=gr.Progress()
+                        ):
+                            if files is None:
+                                return "", "0 行"
+
+                            images = []
+                            for f in files:
+                                try:
+                                    img = Image.open(f.name)
+                                    images.append(img)
+                                except Exception:
+                                    pass
+
+                            if not images:
+                                return "", "0 行"
+
+                            # チェックされたカテゴリのリストを構築
+                            check_map = {
+                                "quality": chk_quality,
+                                "character_count": chk_character_count,
+                                "hair_color": chk_hair_color,
+                                "hair_style": chk_hair_style,
+                                "eye_color": chk_eye_color,
+                                "eye_feature": chk_eye_feature,
+                                "body": chk_body,
+                                "angle": chk_angle,
+                                "focus": chk_focus,
+                                "expression": chk_expression,
+                                "pose": chk_pose,
+                                "background": chk_background,
+                                "clothing": chk_clothing,
+                                "other": chk_other,
+                            }
+                            selected = [cat for cat, checked in check_map.items() if checked]
+
+                            result = analyze_images_per_row(
+                                images, general_th, char_th, selected, progress
+                            )
+                            line_count = len(result.strip().split("\n")) if result.strip() else 0
+                            return result, f"{line_count} 行"
+
+                        # チェックボックスをCATEGORY_ORDER順にinputsリストへ追加
+                        pi_check_inputs = [pi_cat_checks[cat] for cat in CATEGORY_ORDER]
+
+                        pi_extract_btn.click(
+                            fn=extract_per_image,
+                            inputs=[pi_files, pi_general_threshold, pi_char_threshold] + pi_check_inputs,
+                            outputs=[pi_output, pi_line_count]
                         )
 
-                        with gr.Group():
-                            gr.Markdown("### しきい値設定")
-                            wc_general_threshold = gr.Slider(
-                                minimum=0.0, maximum=1.0, value=0.35, step=0.05,
-                                label="一般タグ"
+                        # ダウンロード
+                        pi_download_btn.click(
+                            fn=create_per_image_wildcard_file,
+                            inputs=[pi_output],
+                            outputs=[pi_download_file]
+                        ).then(
+                            fn=lambda x: gr.update(visible=True) if x else gr.update(visible=False),
+                            inputs=[pi_download_file],
+                            outputs=[pi_download_file]
+                        )
+
+                    # --- サブタブ: カテゴリ別ワイルドカード（既存） ---
+                    with gr.TabItem("カテゴリ別"):
+                        gr.Markdown("複数の画像からタグを抽出し、カテゴリ別にワイルドカードを作成します")
+
+                        with gr.Row():
+                            with gr.Column(scale=1):
+                                multi_images = gr.Gallery(
+                                    label="画像をアップロード（複数可）",
+                                    columns=3,
+                                    height=300,
+                                    object_fit="contain"
+                                )
+                                multi_files = gr.File(
+                                    label="画像ファイルを選択",
+                                    file_count="multiple",
+                                    file_types=["image"]
+                                )
+
+                                with gr.Group():
+                                    gr.Markdown("### しきい値設定")
+                                    wc_general_threshold = gr.Slider(
+                                        minimum=0.0, maximum=1.0, value=0.35, step=0.05,
+                                        label="一般タグ"
+                                    )
+                                    wc_char_threshold = gr.Slider(
+                                        minimum=0.0, maximum=1.0, value=0.85, step=0.05,
+                                        label="キャラクタータグ"
+                                    )
+
+                                extract_btn = gr.Button("タグを抽出", variant="primary")
+
+                            with gr.Column(scale=2):
+                                gr.Markdown("### カテゴリ別タグ（1行1タグ = ワイルドカード形式）")
+                                with gr.Row():
+                                    wc_angle = gr.Textbox(label="アングル", lines=8)
+                                    wc_focus = gr.Textbox(label="フォーカス", lines=8)
+                                    wc_expression = gr.Textbox(label="表情", lines=8)
+
+                                with gr.Row():
+                                    wc_pose = gr.Textbox(label="ポーズ", lines=8)
+                                    wc_background = gr.Textbox(label="背景", lines=8)
+                                    wc_clothing = gr.Textbox(label="服装", lines=8)
+
+                                with gr.Row():
+                                    wc_char_attr = gr.Textbox(label="キャラクター属性", lines=8)
+                                    wc_other = gr.Textbox(label="その他", lines=8)
+
+                                gr.Markdown("### ダウンロードするカテゴリを選択")
+                                with gr.Row():
+                                    wc_chk_angle = gr.Checkbox(label="アングル", value=True)
+                                    wc_chk_focus = gr.Checkbox(label="フォーカス", value=True)
+                                    wc_chk_expression = gr.Checkbox(label="表情", value=True)
+                                    wc_chk_pose = gr.Checkbox(label="ポーズ", value=True)
+                                with gr.Row():
+                                    wc_chk_background = gr.Checkbox(label="背景", value=True)
+                                    wc_chk_clothing = gr.Checkbox(label="服装", value=True)
+                                    wc_chk_char_attr = gr.Checkbox(label="キャラクター属性", value=True)
+                                    wc_chk_other = gr.Checkbox(label="その他", value=True)
+
+                                with gr.Row():
+                                    wc_download_btn = gr.Button("選択カテゴリをZIPでダウンロード", variant="secondary")
+                                    wc_download_file = gr.File(label="ダウンロード", visible=False)
+
+                        multi_files.change(
+                            fn=load_images_from_files,
+                            inputs=[multi_files],
+                            outputs=[multi_images]
+                        )
+
+                        # タグ抽出
+                        def extract_from_files(files, general_th, char_th, progress=gr.Progress()):
+                            if files is None:
+                                return "", "", "", "", "", "", "", ""
+                            images = []
+                            for f in files:
+                                try:
+                                    img = Image.open(f.name)
+                                    images.append(img)
+                                except Exception:
+                                    pass
+                            return analyze_multiple_images(images, general_th, char_th, progress)
+
+                        extract_btn.click(
+                            fn=extract_from_files,
+                            inputs=[multi_files, wc_general_threshold, wc_char_threshold],
+                            outputs=[wc_angle, wc_focus, wc_expression, wc_pose, wc_background, wc_clothing, wc_char_attr, wc_other]
+                        )
+
+                        # ワイルドカードZIPダウンロード（改行区切り用）
+                        def create_selected_wildcards_zip_from_newline(
+                            angle: str, focus: str, expression: str, pose: str,
+                            background: str, clothing: str, char_attr: str, other: str,
+                            chk_angle: bool, chk_focus: bool, chk_expression: bool, chk_pose: bool,
+                            chk_background: bool, chk_clothing: bool, chk_char_attr: bool, chk_other: bool
+                        ) -> Optional[str]:
+                            """選択されたカテゴリの改行区切りテキストからZIPファイルを作成"""
+                            categories = {
+                                "angle": (angle, chk_angle),
+                                "focus": (focus, chk_focus),
+                                "expression": (expression, chk_expression),
+                                "pose": (pose, chk_pose),
+                                "background": (background, chk_background),
+                                "clothing": (clothing, chk_clothing),
+                                "character": (char_attr, chk_char_attr),
+                                "other": (other, chk_other),
+                            }
+
+                            has_content = any(
+                                checked and tags_text and tags_text.strip()
+                                for tags_text, checked in categories.values()
                             )
-                            wc_char_threshold = gr.Slider(
-                                minimum=0.0, maximum=1.0, value=0.85, step=0.05,
-                                label="キャラクタータグ"
-                            )
+                            if not has_content:
+                                return None
 
-                        extract_btn = gr.Button("タグを抽出", variant="primary")
+                            tmp_dir = tempfile.mkdtemp()
+                            zip_path = os.path.join(tmp_dir, "wildcards.zip")
 
-                    with gr.Column(scale=2):
-                        gr.Markdown("### カテゴリ別タグ（1行1タグ = ワイルドカード形式）")
-                        with gr.Row():
-                            wc_angle = gr.Textbox(label="アングル", lines=8)
-                            wc_focus = gr.Textbox(label="フォーカス", lines=8)
-                            wc_expression = gr.Textbox(label="表情", lines=8)
+                            with zipfile.ZipFile(zip_path, 'w') as zf:
+                                for cat_name, (tags_text, checked) in categories.items():
+                                    if checked and tags_text and tags_text.strip():
+                                        # 既に改行区切りなのでそのまま使用
+                                        zf.writestr(f"{cat_name}.txt", tags_text.strip())
 
-                        with gr.Row():
-                            wc_pose = gr.Textbox(label="ポーズ", lines=8)
-                            wc_background = gr.Textbox(label="背景", lines=8)
-                            wc_clothing = gr.Textbox(label="服装", lines=8)
+                            return zip_path
 
-                        with gr.Row():
-                            wc_char_attr = gr.Textbox(label="キャラクター属性", lines=8)
-                            wc_other = gr.Textbox(label="その他", lines=8)
-
-                        gr.Markdown("### ダウンロードするカテゴリを選択")
-                        with gr.Row():
-                            wc_chk_angle = gr.Checkbox(label="アングル", value=True)
-                            wc_chk_focus = gr.Checkbox(label="フォーカス", value=True)
-                            wc_chk_expression = gr.Checkbox(label="表情", value=True)
-                            wc_chk_pose = gr.Checkbox(label="ポーズ", value=True)
-                        with gr.Row():
-                            wc_chk_background = gr.Checkbox(label="背景", value=True)
-                            wc_chk_clothing = gr.Checkbox(label="服装", value=True)
-                            wc_chk_char_attr = gr.Checkbox(label="キャラクター属性", value=True)
-                            wc_chk_other = gr.Checkbox(label="その他", value=True)
-
-                        with gr.Row():
-                            wc_download_btn = gr.Button("選択カテゴリをZIPでダウンロード", variant="secondary")
-                            wc_download_file = gr.File(label="ダウンロード", visible=False)
-
-                # ファイルアップロード時にギャラリーを更新
-                def update_gallery(files):
-                    if files is None:
-                        return []
-                    images = []
-                    for f in files:
-                        try:
-                            img = Image.open(f.name)
-                            images.append(img)
-                        except:
-                            pass
-                    return images
-
-                multi_files.change(
-                    fn=update_gallery,
-                    inputs=[multi_files],
-                    outputs=[multi_images]
-                )
-
-                # タグ抽出
-                def extract_from_files(files, general_th, char_th, progress=gr.Progress()):
-                    if files is None:
-                        return "", "", "", "", "", "", "", ""
-                    images = []
-                    for f in files:
-                        try:
-                            img = Image.open(f.name)
-                            images.append(img)
-                        except:
-                            pass
-                    return analyze_multiple_images(images, general_th, char_th, progress)
-
-                extract_btn.click(
-                    fn=extract_from_files,
-                    inputs=[multi_files, wc_general_threshold, wc_char_threshold],
-                    outputs=[wc_angle, wc_focus, wc_expression, wc_pose, wc_background, wc_clothing, wc_char_attr, wc_other]
-                )
-
-                # ワイルドカードZIPダウンロード（改行区切り用）
-                def create_selected_wildcards_zip_from_newline(
-                    angle: str, focus: str, expression: str, pose: str,
-                    background: str, clothing: str, char_attr: str, other: str,
-                    chk_angle: bool, chk_focus: bool, chk_expression: bool, chk_pose: bool,
-                    chk_background: bool, chk_clothing: bool, chk_char_attr: bool, chk_other: bool
-                ) -> Optional[str]:
-                    """選択されたカテゴリの改行区切りテキストからZIPファイルを作成"""
-                    categories = {
-                        "angle": (angle, chk_angle),
-                        "focus": (focus, chk_focus),
-                        "expression": (expression, chk_expression),
-                        "pose": (pose, chk_pose),
-                        "background": (background, chk_background),
-                        "clothing": (clothing, chk_clothing),
-                        "character": (char_attr, chk_char_attr),
-                        "other": (other, chk_other),
-                    }
-
-                    has_content = any(
-                        checked and tags_text and tags_text.strip()
-                        for tags_text, checked in categories.values()
-                    )
-                    if not has_content:
-                        return None
-
-                    tmp_dir = tempfile.mkdtemp()
-                    zip_path = os.path.join(tmp_dir, "wildcards.zip")
-
-                    with zipfile.ZipFile(zip_path, 'w') as zf:
-                        for cat_name, (tags_text, checked) in categories.items():
-                            if checked and tags_text and tags_text.strip():
-                                # 既に改行区切りなのでそのまま使用
-                                zf.writestr(f"{cat_name}.txt", tags_text.strip())
-
-                    return zip_path
-
-                wc_download_btn.click(
-                    fn=create_selected_wildcards_zip_from_newline,
-                    inputs=[wc_angle, wc_focus, wc_expression, wc_pose,
-                            wc_background, wc_clothing, wc_char_attr, wc_other,
-                            wc_chk_angle, wc_chk_focus, wc_chk_expression, wc_chk_pose,
-                            wc_chk_background, wc_chk_clothing, wc_chk_char_attr, wc_chk_other],
-                    outputs=[wc_download_file]
-                ).then(
-                    fn=lambda x: gr.update(visible=True) if x else gr.update(visible=False),
-                    inputs=[wc_download_file],
-                    outputs=[wc_download_file]
-                )
+                        wc_download_btn.click(
+                            fn=create_selected_wildcards_zip_from_newline,
+                            inputs=[wc_angle, wc_focus, wc_expression, wc_pose,
+                                    wc_background, wc_clothing, wc_char_attr, wc_other,
+                                    wc_chk_angle, wc_chk_focus, wc_chk_expression, wc_chk_pose,
+                                    wc_chk_background, wc_chk_clothing, wc_chk_char_attr, wc_chk_other],
+                            outputs=[wc_download_file]
+                        ).then(
+                            fn=lambda x: gr.update(visible=True) if x else gr.update(visible=False),
+                            inputs=[wc_download_file],
+                            outputs=[wc_download_file]
+                        )
 
     return app
 
